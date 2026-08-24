@@ -47,7 +47,9 @@ export class Snapshotter {
 		this.timer = setTimeout(async () => {
 			this.timer = null;
 
-			const shouldContinue = await this.takeSnapshot();
+			const shouldContinue = await this.takeSnapshot(
+				new Date(nextSecond),
+			);
 
 			if (shouldContinue) {
 				this.scheduleNext();
@@ -55,7 +57,7 @@ export class Snapshotter {
 		}, delay);
 	}
 
-	private async takeSnapshot(): Promise<boolean> {
+	private async takeSnapshot(snapshotTime: Date): Promise<boolean> {
 		const now = new Date();
 
 		const startMs = this.options.startTime.getTime();
@@ -88,7 +90,7 @@ export class Snapshotter {
 		}
 
 		await insertMarketSnapshot({
-			time: now,
+			time: snapshotTime,
 			marketId: this.options.marketId,
 
 			elapsedSeconds,
@@ -108,7 +110,7 @@ export class Snapshotter {
 		});
 
 		console.log(
-			`${now.toISOString()} | ` +
+			`${snapshotTime.toISOString()} | ` +
 				`UP ${state.up.bestBid} / ${state.up.bestAsk} | ` +
 				`DOWN ${state.down.bestBid} / ${state.down.bestAsk}`,
 		);
