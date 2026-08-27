@@ -4,6 +4,12 @@ import { createMarketState, type MarketState } from "../recorder/state.js";
 
 const CLOB_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 
+const PING_INTERVAL_MS = 10_000;
+const PONG_TIMEOUT_MS = 5_000;
+
+const RECONNECT_INITIAL_DELAY_MS = 1_000;
+const RECONNECT_MAX_DELAY_MS = 30_000;
+
 interface PriceChange {
 	asset_id: string;
 	price: string;
@@ -62,45 +68,208 @@ export class ClobClient {
 
 	private readonly state: MarketState = createMarketState();
 
+	private pingTimer: NodeJS.Timeout | null = null;
+	private pongTimeoutTimer: NodeJS.Timeout | null = null;
+	private reconnectTimer: NodeJS.Timeout | null = null;
+
+	private shouldReconnect = true;
+	private reconnectAttempt = 0;
+
 	constructor(private readonly options: ClobClientOptions) {}
 
 	connect(): void {
-		this.ws = new WebSocket(CLOB_WS_URL);
+		this.shouldReconnect = true;
 
-		this.ws.on("open", () => {
-			console.log("CLOB WebSocket connected");
-
-			this.subscribe();
-		});
-
-		this.ws.on("message", (data) => {
-			this.handleMessage(data.toString());
-		});
-
-		this.ws.on("error", (error) => {
-			console.error("CLOB WebSocket error:", error);
-		});
-
-		this.ws.on("close", (code, reason) => {
-			console.log("CLOB WebSocket closed:", code, reason.toString());
-		});
-	}
-
-	close(): void {
-		if (!this.ws) {
+		if (this.ws) {
 			return;
 		}
 
-		this.ws.close();
+		this.createConnection();
+	}
+
+	close(): void {
+		this.shouldReconnect = false;
+
+		this.clearHeartbeat();
+		this.clearReconnectTimer();
+
+		const ws = this.ws;
+
+		if (!ws) {
+			return;
+		}
+
 		this.ws = null;
+
+		if (ws.readyState === WebSocket.CONNECTING) {
+			ws.terminate();
+			return;
+		}
+
+		ws.removeAllListeners();
+		ws.close();
 	}
 
 	getState(): MarketState {
 		return this.state;
 	}
 
+	private createConnection(): void {
+		if (!this.shouldReconnect || this.ws) {
+			return;
+		}
+
+		console.log(
+			`Connecting to CLOB WebSocket${
+				this.reconnectAttempt > 0
+					? ` (attempt ${this.reconnectAttempt})`
+					: ""
+			}...`,
+		);
+
+		const ws = new WebSocket(CLOB_WS_URL);
+
+		this.ws = ws;
+
+		ws.on("open", () => {
+			if (this.ws !== ws) {
+				return;
+			}
+
+			console.log("CLOB WebSocket connected");
+
+			this.reconnectAttempt = 0;
+
+			this.subscribe();
+			this.startHeartbeat();
+		});
+
+		ws.on("message", (data) => {
+			if (this.ws !== ws) {
+				return;
+			}
+
+			this.handleMessage(data.toString());
+		});
+
+		ws.on("error", (error) => {
+			if (this.ws !== ws) {
+				return;
+			}
+
+			console.error("CLOB WebSocket error:", error);
+		});
+
+		ws.on("close", (code, reason) => {
+			if (this.ws !== ws) {
+				return;
+			}
+
+			console.log("CLOB WebSocket closed:", code, reason.toString());
+
+			this.clearHeartbeat();
+			this.ws = null;
+
+			if (this.shouldReconnect) {
+				this.scheduleReconnect();
+			}
+		});
+	}
+
+	private scheduleReconnect(): void {
+		if (!this.shouldReconnect || this.reconnectTimer) {
+			return;
+		}
+
+		const delay = Math.min(
+			RECONNECT_INITIAL_DELAY_MS * 2 ** this.reconnectAttempt,
+			RECONNECT_MAX_DELAY_MS,
+		);
+
+		this.reconnectAttempt += 1;
+
+		console.log(`Reconnecting to CLOB WebSocket in ${delay}ms...`);
+
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = null;
+
+			if (!this.shouldReconnect || this.ws) {
+				return;
+			}
+
+			this.createConnection();
+		}, delay);
+	}
+
+	private startHeartbeat(): void {
+		this.clearHeartbeat();
+
+		this.pingTimer = setInterval(() => {
+			this.sendPing();
+		}, PING_INTERVAL_MS);
+
+		this.sendPing();
+	}
+
+	private sendPing(): void {
+		const ws = this.ws;
+
+		if (!ws || ws.readyState !== WebSocket.OPEN) {
+			return;
+		}
+
+		try {
+			ws.send("PING");
+
+			this.clearPongTimeout();
+
+			this.pongTimeoutTimer = setTimeout(() => {
+				if (this.ws !== ws) {
+					return;
+				}
+
+				console.warn(
+					"CLOB WebSocket PONG timeout. Terminating connection...",
+				);
+
+				ws.terminate();
+			}, PONG_TIMEOUT_MS);
+		} catch (error) {
+			console.error("Failed to send CLOB WebSocket PING:", error);
+
+			ws.terminate();
+		}
+	}
+
+	private handlePong(): void {
+		this.clearPongTimeout();
+	}
+
+	private clearHeartbeat(): void {
+		if (this.pingTimer) {
+			clearInterval(this.pingTimer);
+			this.pingTimer = null;
+		}
+
+		this.clearPongTimeout();
+	}
+
+	private clearPongTimeout(): void {
+		if (this.pongTimeoutTimer) {
+			clearTimeout(this.pongTimeoutTimer);
+			this.pongTimeoutTimer = null;
+		}
+	}
+
+	private clearReconnectTimer(): void {
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = null;
+		}
+	}
+
 	private subscribe(): void {
-		if (!this.ws) {
+		if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
 			return;
 		}
 
@@ -163,7 +332,25 @@ export class ClobClient {
 	}
 
 	private handleMessage(message: string): void {
-		const parsed: unknown = JSON.parse(message);
+		if (message === "PONG") {
+			this.handlePong();
+			return;
+		}
+
+		let parsed: unknown;
+
+		try {
+			parsed = JSON.parse(message);
+		} catch (error) {
+			console.warn(
+				"Failed to parse CLOB WebSocket message:",
+				message,
+				error,
+			);
+			return;
+		}
+
+		// console.log(parsed);
 
 		if (Array.isArray(parsed)) {
 			for (const item of parsed) {
@@ -187,6 +374,7 @@ export class ClobClient {
 			if (!tokenState) {
 				continue;
 			}
+
 			tokenState.bestBid = Number(change.best_bid);
 			tokenState.bestAsk = Number(change.best_ask);
 
@@ -234,18 +422,6 @@ export class ClobClient {
 
 		tokenState.updatedAt = timestamp;
 	}
-
-	// private getTokenState(assetId: string) {
-	// 	if (assetId === this.options.upTokenId) {
-	// 		return this.state.up;
-	// 	}
-
-	// 	if (assetId === this.options.downTokenId) {
-	// 		return this.state.down;
-	// 	}
-
-	// 	return null;
-	// }
 
 	private getTokenState(assetId: string) {
 		if (assetId === this.options.upTokenId) {

@@ -1,98 +1,88 @@
-import { getMidPrice, isMarketStateReady, type MarketState } from "./state.js";
+import type { ClobClient } from "../polymarket/clob.client.js";
+import type { Market } from "../polymarket/types.js";
+import { writeSnapshot } from "./writer.js";
 
-import { insertMarketSnapshot } from "../db/repositories/market-snapshots.js";
-
-interface SnapshotterOptions {
-	marketId: number;
-	startTime: Date;
-	endTime: Date;
-	getState: () => MarketState;
-}
+const SNAPSHOT_INTERVAL_MS = 1_000;
 
 export class Snapshotter {
 	private timer: NodeJS.Timeout | null = null;
-	private resolveFinished: (() => void) | null = null;
-	constructor(private readonly options: SnapshotterOptions) {}
+	private stopTimer: NodeJS.Timeout | null = null;
+	private running = false;
+
+	constructor(
+		private readonly market: Market,
+		private readonly clobClient: ClobClient,
+	) {}
 
 	start(): Promise<void> {
-		if (this.timer) {
+		if (this.running) {
 			return Promise.resolve();
 		}
 
+		this.running = true;
+
+		// Take the first snapshot immediately.
+		this.takeSnapshot();
+
+		this.timer = setInterval(() => {
+			this.takeSnapshot();
+		}, SNAPSHOT_INTERVAL_MS);
+
+		const endMs = this.market.endTime.getTime();
+		const delayMs = Math.max(0, endMs - Date.now());
+
 		return new Promise((resolve) => {
-			this.resolveFinished = resolve;
-			this.scheduleNext();
+			this.stopTimer = setTimeout(() => {
+				this.stopTimer = null;
+				this.stop();
+				resolve();
+			}, delayMs);
 		});
 	}
 
 	stop(): void {
 		if (this.timer) {
-			clearTimeout(this.timer);
+			clearInterval(this.timer);
 			this.timer = null;
 		}
 
-		if (this.resolveFinished) {
-			this.resolveFinished();
-			this.resolveFinished = null;
+		if (this.stopTimer) {
+			clearTimeout(this.stopTimer);
+			this.stopTimer = null;
 		}
+
+		this.running = false;
 	}
 
-	private scheduleNext(): void {
-		const now = Date.now();
+	private takeSnapshot(): void {
+		if (!this.running) {
+			return;
+		}
 
-		const nextSecond = Math.floor(now / 1000) * 1000 + 1000;
-
-		const delay = nextSecond - now;
-
-		this.timer = setTimeout(async () => {
-			this.timer = null;
-
-			const shouldContinue = await this.takeSnapshot(
-				new Date(nextSecond),
-			);
-
-			if (shouldContinue) {
-				this.scheduleNext();
-			}
-		}, delay);
-	}
-
-	private async takeSnapshot(snapshotTime: Date): Promise<boolean> {
 		const now = new Date();
+		const state = this.clobClient.getState();
 
-		const startMs = this.options.startTime.getTime();
-		const endMs = this.options.endTime.getTime();
+		const startMs = this.market.startTime.getTime();
+		const endMs = this.market.endTime.getTime();
 		const nowMs = now.getTime();
-
-		// The market has ended according to Gamma.
-		if (nowMs >= endMs) {
-			console.log(
-				`Market ${this.options.marketId} ended at ${now.toISOString()}`,
-			);
-
-			this.resolveFinished?.();
-			this.resolveFinished = null;
-
-			return false;
-		}
 
 		const elapsedSeconds = Math.max(
 			0,
-			Math.floor((nowMs - startMs) / 1000),
+			Math.floor((nowMs - startMs) / 1_000),
 		);
 
-		const remainingSeconds = Math.max(0, Math.ceil((endMs - nowMs) / 1000));
+		const remainingSeconds = Math.max(
+			0,
+			Math.ceil((endMs - nowMs) / 1_000),
+		);
 
-		const state = this.options.getState();
+		const upMid = calculateMid(state.up.bestBid, state.up.bestAsk);
 
-		if (!isMarketStateReady(state)) {
-			return true;
-		}
+		const downMid = calculateMid(state.down.bestBid, state.down.bestAsk);
 
-		await insertMarketSnapshot({
-			time: snapshotTime,
-			marketId: this.options.marketId,
-
+		void writeSnapshot({
+			time: now,
+			marketId: this.market.id,
 			elapsedSeconds,
 			remainingSeconds,
 
@@ -100,21 +90,21 @@ export class Snapshotter {
 
 			upBid: state.up.bestBid,
 			upAsk: state.up.bestAsk,
-			upMid: getMidPrice(state.up),
+			upMid,
 			upLast: state.up.lastTradePrice,
 
 			downBid: state.down.bestBid,
 			downAsk: state.down.bestAsk,
-			downMid: getMidPrice(state.down),
+			downMid,
 			downLast: state.down.lastTradePrice,
 		});
-
-		console.log(
-			`${snapshotTime.toISOString()} | ` +
-				`UP ${state.up.bestBid} / ${state.up.bestAsk} | ` +
-				`DOWN ${state.down.bestBid} / ${state.down.bestAsk}`,
-		);
-
-		return true;
 	}
+}
+
+function calculateMid(bid: number | null, ask: number | null): number | null {
+	if (bid === null || ask === null) {
+		return null;
+	}
+
+	return (bid + ask) / 2;
 }

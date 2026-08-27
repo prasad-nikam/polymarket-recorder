@@ -6,7 +6,15 @@ export interface TokenState {
 	lastTradeSize: number | null;
 	lastTradeSide: "BUY" | "SELL" | null;
 
+	/**
+	 * Timestamp of the latest book/price update for this token.
+	 * This is the exchange event timestamp, not our snapshot time.
+	 */
 	updatedAt: number | null;
+
+	/**
+	 * Timestamp of the latest trade event for this token.
+	 */
 	lastTradeAt: number | null;
 }
 
@@ -14,6 +22,10 @@ export interface MarketState {
 	up: TokenState;
 	down: TokenState;
 
+	/**
+	 * Timestamp of the latest CLOB market event received
+	 * for either token.
+	 */
 	lastEventAt: number | null;
 }
 
@@ -38,21 +50,4 @@ export function createMarketState(): MarketState {
 
 		lastEventAt: null,
 	};
-}
-
-export function getMidPrice(token: TokenState): number | null {
-	if (token.bestBid === null || token.bestAsk === null) {
-		return null;
-	}
-
-	return (token.bestBid + token.bestAsk) / 2;
-}
-
-export function isMarketStateReady(state: MarketState): boolean {
-	return (
-		state.up.bestBid !== null &&
-		state.up.bestAsk !== null &&
-		state.down.bestBid !== null &&
-		state.down.bestAsk !== null
-	);
 }

@@ -34,3 +34,16 @@ export interface GammaMarket {
 	outcomePrices: string;
 	clobTokenIds: string;
 }
+
+export interface Market {
+	id: number;
+
+	event: GammaEvent;
+	market: GammaMarket;
+
+	startTime: Date;
+	endTime: Date;
+
+	upTokenId: string;
+	downTokenId: string;
+}

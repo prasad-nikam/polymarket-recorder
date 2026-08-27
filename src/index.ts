@@ -71,13 +71,18 @@ async function main(): Promise<void> {
 			downTokenId: market.downTokenId,
 		});
 
-		const snapshotter = new Snapshotter({
-			marketId: savedMarket.id,
-			startTime: market.startTime,
-			endTime: market.endTime,
-			getState: () => clobClient.getState(),
-		});
-
+		const snapshotter = new Snapshotter(
+			{
+				id: savedMarket.id,
+				event: market.event,
+				market: market.market,
+				startTime: market.startTime,
+				endTime: market.endTime,
+				upTokenId: market.upTokenId,
+				downTokenId: market.downTokenId,
+			},
+			clobClient,
+		);
 		try {
 			clobClient.connect();
 
